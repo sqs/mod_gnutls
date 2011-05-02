@@ -83,6 +83,7 @@ typedef struct
 
 typedef struct
 {
+    server_rec *server;
     gnutls_certificate_credentials_t certs;
     gnutls_srp_server_credentials_t srp_creds;
     gnutls_anon_server_credentials_t anon_creds;

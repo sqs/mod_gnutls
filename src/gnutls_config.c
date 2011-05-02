@@ -626,6 +626,7 @@ void *mgs_config_server_create(apr_pool_t * p, server_rec * s)
 	int ret;
 
 	sc->enabled = GNUTLS_ENABLED_FALSE;
+	sc->server = s;
 
 	ret = gnutls_certificate_allocate_credentials(&sc->certs);
 	if (ret < 0) {
