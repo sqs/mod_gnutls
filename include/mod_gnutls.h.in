@@ -27,6 +27,12 @@
 #include "apr_tables.h"
 #include "ap_release.h"
 
+#ifdef ENABLE_SRP
+#include "apr_optional.h"
+#include "apr_dbd.h"
+#include "mod_dbd.h"
+#endif
+
 #include <gnutls/gnutls.h>
 #include <gnutls/extra.h>
 #include <gnutls/openpgp.h>
@@ -105,6 +111,7 @@ typedef struct
     mgs_cache_e cache_type;
     const char* cache_config;
     const char* srp_tpasswd_file;
+    const char* srp_passwd_query;
     const char* srp_tpasswd_conf_file;
     gnutls_x509_crt_t *ca_list;
     gnutls_openpgp_keyring_t pgp_list;
@@ -246,6 +253,8 @@ const char *mgs_set_srp_tpasswd_conf_file(cmd_parms * parms, void *dummy,
                                         const char *arg);
 const char *mgs_set_srp_tpasswd_file(cmd_parms * parms, void *dummy,
                                         const char *arg);
+const char *mgs_set_srp_passwd_query(cmd_parms * parms, void *cfg,
+                                        const char *query);
 const char *mgs_set_dh_file(cmd_parms * parms, void *dummy,
                                         const char *arg);
 const char *mgs_set_rsa_export_file(cmd_parms * parms, void *dummy,
@@ -318,8 +327,17 @@ int mgs_hook_pre_connection(conn_rec * c, void *csd);
 
 int mgs_hook_fixups(request_rec *r);
 
+void mgs_hook_opt_retr(void);
+
 int mgs_hook_authz(request_rec *r);
 
 int mgs_authz_lua(request_rec* r);
+
+/* mod_gnutls External Function Pointers. */
+#ifdef ENABLE_SRP
+static APR_OPTIONAL_FN_TYPE(ap_dbd_prepare) *mgs_dbd_prepare_fn = NULL;
+static APR_OPTIONAL_FN_TYPE(ap_dbd_open) *mgs_dbd_open_fn = NULL;
+static APR_OPTIONAL_FN_TYPE(ap_dbd_close) *mgs_dbd_close_fn = NULL;
+#endif
 
 #endif /*  __mod_gnutls_h_inc */

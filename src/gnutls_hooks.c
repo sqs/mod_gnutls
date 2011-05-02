@@ -31,6 +31,10 @@ GCRY_THREAD_OPTION_PTHREAD_IMPL;
 extern server_rec *ap_server_conf;
 #endif
 
+#ifdef ENABLE_SRP
+#include "apr_base64.h"
+#endif
+
 #if MOD_GNUTLS_DEBUG
 static apr_file_t *debug_log_fp;
 #endif
@@ -47,6 +51,15 @@ static void mgs_add_common_pgpcert_vars(request_rec * r,
 					gnutls_openpgp_crt_t cert,
 					int side,
 					int export_certificates_enabled);
+
+/* GnuTLS Callbacks */
+#ifdef ENABLE_SRP
+static int mgs_srp_server_credentials(gnutls_session_t session,
+                                      const char * username,
+                                      gnutls_datum_t * salt,
+                                      gnutls_datum_t * verifier,
+                                      gnutls_datum_t * g, gnutls_datum_t * n);
+#endif
 
 static apr_status_t mgs_cleanup_pre_config(void *data)
 {
@@ -160,7 +173,8 @@ static int mgs_select_virtual_server_cb(gnutls_session_t session)
 
 #ifdef ENABLE_SRP
 	if (ctxt->sc->srp_tpasswd_conf_file != NULL
-	    && ctxt->sc->srp_tpasswd_file != NULL) {
+	    && (ctxt->sc->srp_tpasswd_file != NULL
+                || ctxt->sc->srp_passwd_query != NULL)) {
 		gnutls_credentials_set(session, GNUTLS_CRD_SRP,
 				       ctxt->sc->srp_creds);
 	}
@@ -431,19 +445,22 @@ mgs_hook_post_config(apr_pool_t * p, apr_pool_t * plog,
 
 #ifdef ENABLE_SRP
 		if (sc->srp_tpasswd_conf_file != NULL
-		    && sc->srp_tpasswd_file != NULL) {
-			rv = gnutls_srp_set_server_credentials_file
-			    (sc->srp_creds, sc->srp_tpasswd_file,
-			     sc->srp_tpasswd_conf_file);
+                    && sc->srp_tpasswd_file != NULL) {
+                        rv = gnutls_srp_set_server_credentials_file
+                                (sc->srp_creds, sc->srp_tpasswd_file,
+                                 sc->srp_tpasswd_conf_file);
 
 			if (rv < 0 && sc->enabled == GNUTLS_ENABLED_TRUE) {
 				ap_log_error(APLOG_MARK, APLOG_STARTUP, 0,
 					     s,
-					     "[GnuTLS] - Host '%s:%d' is missing a "
-					     "SRP password or conf File!",
+					     "[GnuTLS] - Host '%s:%d' is missing "
+					     "SRP passwd or conf File!",
 					     s->server_hostname, s->port);
 				exit(-1);
 			}
+                } else if (sc->srp_passwd_query != NULL) {
+                        gnutls_srp_set_server_credentials_function
+                                (sc->srp_creds, &mgs_srp_server_credentials);
 		}
 #endif
 
@@ -1340,3 +1357,146 @@ static int mgs_cert_verify(request_rec * r, mgs_handle_t * ctxt)
 
 
 }
+
+void mgs_hook_opt_retr(void) {
+#ifdef ENABLE_SRP
+	if (mgs_dbd_prepare_fn == NULL) {
+		mgs_dbd_prepare_fn = APR_RETRIEVE_OPTIONAL_FN(ap_dbd_prepare);
+		mgs_dbd_open_fn = APR_RETRIEVE_OPTIONAL_FN(ap_dbd_open);
+		mgs_dbd_close_fn = APR_RETRIEVE_OPTIONAL_FN(ap_dbd_close);
+	}
+#endif
+}
+
+#ifdef ENABLE_SRP
+static int mgs_srp_server_credentials(gnutls_session_t session,
+				      const char * username,
+				      gnutls_datum_t * salt,
+				      gnutls_datum_t * verifier,
+				      gnutls_datum_t * g, gnutls_datum_t * n)
+{
+	apr_status_t rv;
+	mgs_handle_t *ctxt = gnutls_transport_get_ptr(session);
+	apr_pool_t *pool = ctxt->c->pool;
+	mgs_srvconf_rec *sc = ctxt->sc;
+	server_rec *server = sc->server;
+	ap_dbd_t *dbd;
+	apr_dbd_row_t *row = NULL;
+	apr_dbd_prepared_t *statement;
+	apr_dbd_results_t *res = NULL;
+	int i;
+	const char *col, *val;
+
+	/* Get database handle. */
+	if (mgs_dbd_open_fn == NULL) {
+		ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, ctxt->c,
+			      "Failed to get mod_dbd open function pointer "
+			      "-- must enable mod_dbd");
+		return -1;
+	}
+	dbd = mgs_dbd_open_fn(pool, server);
+	if (dbd == NULL) {
+		ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, ctxt->c,
+			      "Failed to get SRP passwd DB handle");
+		return -1;
+	}
+
+	/* Execute query. */
+	if (ctxt->sc->srp_passwd_query == NULL) {
+		ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, ctxt->c,
+			     "GnuTLSSRPPasswdQuery wasn't set");
+		mgs_dbd_close_fn(server, dbd);
+		return -1;
+	}
+	statement = apr_hash_get(dbd->prepared, sc->srp_passwd_query,
+				 APR_HASH_KEY_STRING);
+	if (statement == NULL) {
+		ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, ctxt->c,
+			      "A prepared statement could not be found for "
+			      "GnuTLSSRPPasswdQuery with the key '%s' on "
+			      "server %s",
+			      sc->srp_passwd_query, sc->server->defn_name);
+		mgs_dbd_close_fn(server, dbd);
+		return -1;
+	}
+	if (apr_dbd_pvselect(dbd->driver, pool, dbd->handle, &res,
+			     statement, 0, username, NULL) != 0) {
+		ap_log_cerror(APLOG_MARK, APLOG_ERR, 0, ctxt->c,
+			      "Query execution error looking up '%s' "
+			      "in SRP passwd DB", username);
+		mgs_dbd_close_fn(server, dbd);
+		return -1;
+	}
+
+	/* Clear outputs. */
+	n->size = 0;	 n->data = NULL;
+	g->size = 0;	 g->data = NULL;
+	verifier->size = 0;  verifier->data = NULL;
+	salt->size = 0;      salt->data = NULL;
+
+	/* Get query results. */
+	rv = apr_dbd_get_row(dbd->driver, pool, res, &row, -1);
+
+	/* Iterate through result columns if found user. */
+	if (rv == 0) {
+		i = 0;
+		while ((col = apr_dbd_get_name(dbd->driver, res, i)) != NULL) {
+			gnutls_datum_t *item = NULL;
+			val = apr_dbd_get_entry(dbd->driver, row, i);
+			i++;
+			if (strcmp(col, "srp_group") == 0) {
+				if (strcmp(val, "1024") == 0) {
+					*n = gnutls_srp_1024_group_prime;
+					*g = gnutls_srp_1024_group_generator;
+				} else if (strcmp(val, "1536") == 0) {
+					*n = gnutls_srp_1536_group_prime;
+					*g = gnutls_srp_1536_group_generator;
+				} else if (strcmp(val, "2048") == 0) {
+					*n = gnutls_srp_2048_group_prime;
+					*g = gnutls_srp_2048_group_generator;
+				} else {
+					ap_log_cerror(APLOG_MARK, APLOG_ERR,
+						      0, ctxt->c,
+						      "Unknown SRP group: %s",
+						      val);
+				}
+			} else if (strcmp(col, "srp_v") == 0) {
+				item = verifier;
+			} else if (strcmp(col, "srp_s") == 0) {
+				item = salt;
+			}
+			if (item != NULL) {
+				item->data = gnutls_malloc
+					(apr_base64_decode_len(val));
+				if (item->data) {
+					item->size = apr_base64_decode
+						((char *)item->data, val);
+				} else {
+					ap_log_cerror(APLOG_MARK, APLOG_CRIT,
+						      0, ctxt->c,
+						      "gnutls_malloc failed");
+				}
+			}
+		}
+	}
+
+	mgs_dbd_close_fn(server, dbd);
+
+	/* Use random params if user isn't found. */
+	if (!(g->size && n->size && salt->size && verifier->size)) {
+		ap_log_cerror(APLOG_MARK, APLOG_INFO, 0, ctxt->c,
+			      "SRP user '%s' not found, using random params",
+			      username);
+		if (verifier->data)
+			gnutls_free(verifier->data);
+		if (salt->data)
+			gnutls_free(salt->data);
+		*n = gnutls_srp_1024_group_prime;
+		*g = gnutls_srp_1024_group_generator;
+		return 1; /* 1 means use random params */
+	}
+
+	return 0;
+}
+
+#endif

@@ -336,7 +336,31 @@ const char *mgs_set_srp_tpasswd_file(cmd_parms * parms, void *dummy,
 						     module_config,
 						     &gnutls_module);
 
+	if (sc->srp_passwd_query)
+		return "GnuTLSSRPPasswdQuery already set here; can't set "
+			"both GnuTLSSRPPasswdQuery and GnuTLSSRPPasswdFile";
+
 	sc->srp_tpasswd_file = ap_server_root_relative(parms->pool, arg);
+
+	return NULL;
+}
+
+const char *mgs_set_srp_passwd_query(cmd_parms * parms, void *cfg,
+				     const char *query)
+{
+	mgs_srvconf_rec *sc =
+		(mgs_srvconf_rec *) ap_get_module_config(parms->server->
+							 module_config,
+							 &gnutls_module);
+
+	if (sc->srp_tpasswd_file)
+		return "GnuTLSSRPPasswdFile already set here; can't set "
+			"both GnuTLSSRPPasswdFile and GnuTLSSRPPasswdQuery";
+
+	if (APR_RETRIEVE_OPTIONAL_FN(ap_dbd_open) == NULL)
+		return "You must load mod_dbd to enable GnuTLSSRPPasswdQuery";
+
+	sc->srp_passwd_query = query;
 
 	return NULL;
 }
@@ -651,6 +675,7 @@ void *mgs_config_server_create(apr_pool_t * p, server_rec * s)
 
 	sc->srp_tpasswd_conf_file = NULL;
 	sc->srp_tpasswd_file = NULL;
+	sc->srp_passwd_query = NULL;
 #endif
 
 	sc->privkey_x509 = NULL;

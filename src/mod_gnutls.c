@@ -42,6 +42,9 @@ static void gnutls_hooks(apr_pool_t * p)
 
 	ap_hook_fixups(mgs_hook_fixups, NULL, NULL, APR_HOOK_REALLY_FIRST);
 
+	ap_hook_optional_fn_retrieve(mgs_hook_opt_retr, NULL, NULL,
+				     APR_HOOK_MIDDLE);
+
 	/* TODO: HTTP Upgrade Filter */
 	/* ap_register_output_filter ("UPGRADE_FILTER", 
 	 *          ssl_io_filter_Upgrade, NULL, AP_FTYPE_PROTOCOL + 5);
@@ -109,6 +112,11 @@ static const command_rec mgs_config_cmds[] = {
 		      NULL,
 		      RSRC_CONF,
 		      "SSL Server SRP Password Conf file"),
+	AP_INIT_TAKE1("GnuTLSSRPPasswdQuery", mgs_set_srp_passwd_query,
+		      NULL,
+		      RSRC_CONF,
+		      "SSL Server SRP password lookup SQL query label "
+		      "(define with DBDPrepareSQL)"),
 	AP_INIT_TAKE1("GnuTLSSRPPasswdConfFile",
 		      mgs_set_srp_tpasswd_conf_file,
 		      NULL,
