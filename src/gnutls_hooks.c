@@ -1444,6 +1444,8 @@ static int mgs_srp_server_credentials(gnutls_session_t session,
 			gnutls_datum_t *item = NULL;
 			val = apr_dbd_get_entry(dbd->driver, row, i);
 			i++;
+                        if (val == NULL)
+                                continue;
 			if (strcmp(col, "srp_group") == 0) {
 				if (strcmp(val, "1024") == 0) {
 					*n = gnutls_srp_1024_group_prime;
